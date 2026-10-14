@@ -75,9 +75,9 @@
 
     <div class="field" style="margin-bottom:0;">
       <label for="amount">Amount</label>
-      <input type="number" id="amount" class="amount-input" value="5000" min="100" step="100" />
+      <input type="number" id="amount" class="amount-input" value="5000" min="1000" step="100" />
     </div>
-    <p class="amount-hint">Minimum ₦100. Funds are credited after confirmation.</p>
+    <p class="amount-hint">Minimum ₦1,000. Funds are credited after confirmation.</p>
 
     <p class="section-label">Pay with</p>
     <div class="pay-tabs">
@@ -91,11 +91,11 @@
         <span class="time" id="countdownTime">05:00</span>
       </div>
       <div class="bank-details">
-        <div class="bank-row"><span class="k">Bank</span><span id="bankName">—</span></div>
-        <div class="bank-row"><span class="k">Account name</span><span id="bankAccountName">—</span></div>
+        <div class="bank-row"><span class="k">Bank</span><span id="bankName">PalmPay</span></div>
+        <div class="bank-row"><span class="k">Account name</span><span id="bankAccountName">fwangshark iliya buildwealth.ng</span></div>
         <div class="bank-row">
           <span class="k">Account number</span>
-          <span><span id="bankAccountNumber">—</span>
+          <span><span id="bankAccountNumber">911 244 6506</span>
             <button class="copy-btn" id="copyAcct" type="button">Copy</button>
           </span>
         </div>
@@ -147,50 +147,51 @@
 <script>
 applySiteMeta("Fund wallet");
 
+const MIN_AMOUNT = 1000;
+
 const errorBanner = document.getElementById("errorBanner");
+const confirmBtn = document.getElementById("confirmTransfer");
+const amountEl = document.getElementById("amount");
 function showError(m){ errorBanner.textContent = m; errorBanner.classList.add("show"); }
 function hideError(){ errorBanner.classList.remove("show"); }
+function readAmount(){ return Math.max(MIN_AMOUNT, parseInt(amountEl.value) || 0); }
 
 let user = null;
-let currentRef = null;
-let currentAmount = 0;
-let timerHandle = null;
-let expiresAt = 0;
-let isCancelled = false;
+let transferRef = null, transferAmount = 0;
+let cardRef = null, cardAmount = 0;
+let timerHandle = null, expiresAt = 0, isCancelled = false;
+let initSeq = 0;
+
+function cancelRef(ref){ if (ref) api.depositCancel(ref).catch(() => {}); }
 
 window.addEventListener("ri:ready", async function (e) {
   user = e.detail;
-
-  try {
-    const { bank } = await api.getContent();
-    if (bank) {
-      document.getElementById("bankName").textContent = bank.bank_name;
-      document.getElementById("bankAccountName").textContent = bank.account_name;
-      document.getElementById("bankAccountNumber").textContent = bank.account_number;
-    }
-  } catch (_) {}
-
   await initiateTransfer();
 });
 
 async function initiateTransfer() {
   hideError();
-  const amount = Math.max(100, parseInt(document.getElementById("amount").value) || 0);
-  currentAmount = amount;
-
+  confirmBtn.disabled = true;
+  const amount = readAmount();
+  amountEl.value = amount; // reflect the enforced minimum in the field
+  const seq = ++initSeq;
   try {
     const res = await api.depositInitiate({ amount, method: "transfer" });
-    currentRef = res.reference;
-    document.getElementById("bankRef").textContent = currentRef;
-    startCountdown(300);
+    if (seq !== initSeq) { cancelRef(res.reference); return; } // superseded
+    transferRef = res.reference;
+    transferAmount = amount;
+    document.getElementById("bankRef").textContent = transferRef;
     isCancelled = false;
+    confirmBtn.disabled = false;
+    startCountdown(300);
   } catch (err) {
-    showError(err.message);
+    if (seq === initSeq) showError(err.message);
   }
 }
 
 function startCountdown(seconds) {
   if (timerHandle) clearInterval(timerHandle);
+  document.getElementById("countdown").classList.remove("warn");
   expiresAt = Date.now() + seconds * 1000;
   updateCountdown();
   timerHandle = setInterval(updateCountdown, 500);
@@ -201,26 +202,26 @@ function updateCountdown() {
   const mm = String(Math.floor(remaining / 60)).padStart(2, "0");
   const ss = String(remaining % 60).padStart(2, "0");
   document.getElementById("countdownTime").textContent = mm + ":" + ss;
-  const cd = document.getElementById("countdown");
-  if (remaining <= 60) cd.classList.add("warn");
+  if (remaining <= 60) document.getElementById("countdown").classList.add("warn");
 
   if (remaining === 0 && !isCancelled) {
     isCancelled = true;
     clearInterval(timerHandle);
-    if (currentRef) {
-      api.depositCancel(currentRef).catch(() => {});
-    }
+    cancelRef(transferRef);
+    transferRef = null;
     document.getElementById("bankRef").textContent = "—";
     showError("Your transfer reference has expired. Enter an amount and start again.");
-    document.getElementById("confirmTransfer").disabled = true;
+    confirmBtn.disabled = true;
   }
 }
 
-document.getElementById("amount").addEventListener("change", function () {
-  if (currentRef) {
-    api.depositCancel(currentRef).catch(() => {});
-  }
-  document.getElementById("confirmTransfer").disabled = false;
+// lock the button the moment the amount is touched, so it can't be clicked mid-change
+amountEl.addEventListener("input", function () { confirmBtn.disabled = true; });
+
+amountEl.addEventListener("change", function () {
+  cancelRef(transferRef);
+  transferRef = null;
+  document.getElementById("bankRef").textContent = "—";
   initiateTransfer();
 });
 
@@ -234,7 +235,7 @@ document.querySelectorAll(".pay-tab").forEach(tab => {
 });
 
 document.getElementById("copyAcct").addEventListener("click", function () {
-  const num = document.getElementById("bankAccountNumber").textContent;
+  const num = document.getElementById("bankAccountNumber").textContent.replace(/\s/g, "");
   navigator.clipboard.writeText(num).then(() => {
     const old = this.textContent;
     this.textContent = "Copied";
@@ -242,18 +243,19 @@ document.getElementById("copyAcct").addEventListener("click", function () {
   });
 });
 
-document.getElementById("confirmTransfer").addEventListener("click", async function () {
-  if (!currentRef || isCancelled) return;
+confirmBtn.addEventListener("click", async function () {
+  if (!transferRef || isCancelled) return;
   hideError();
   this.disabled = true;
   this.textContent = "Submitting…";
   try {
-    await api.depositTransferPaid(currentRef);
+    await api.depositTransferPaid(transferRef);
     if (timerHandle) clearInterval(timerHandle);
+    transferRef = null; // paid: don't cancel on unload
     document.getElementById("depositView").style.display = "none";
     document.getElementById("successView").style.display = "flex";
     document.getElementById("successDetail").textContent =
-      "Your deposit of " + fmt.currency(currentAmount) + " is awaiting confirmation.";
+      "Your deposit of " + fmt.currency(transferAmount) + " is awaiting confirmation.";
   } catch (err) {
     showError(err.message);
     this.disabled = false;
@@ -263,23 +265,26 @@ document.getElementById("confirmTransfer").addEventListener("click", async funct
 
 document.getElementById("payWithCard").addEventListener("click", async function () {
   hideError();
-  const amount = Math.max(100, parseInt(document.getElementById("amount").value) || 0);
-  currentAmount = amount;
+  const amount = readAmount();
+  amountEl.value = amount;
   this.disabled = true;
   this.textContent = "Opening…";
   try {
+    cancelRef(cardRef); // drop any earlier abandoned card attempt
     const res = await api.depositInitiate({ amount, method: "card" });
-    currentRef = res.reference;
+    cardRef = res.reference;
+    cardAmount = amount;
     payarModal.open({
-      reference: currentRef,
-      amount: currentAmount,
+      reference: cardRef,
+      amount: cardAmount,
       email: user.email,
       onComplete: function () {
+        cardRef = null; // completed: don't cancel on unload
         document.getElementById("depositView").style.display = "none";
         document.getElementById("successView").style.display = "flex";
         document.getElementById("successTitle").textContent = "Payment submitted";
         document.getElementById("successDetail").textContent =
-          "Your payment of " + fmt.currency(currentAmount) + " is processing. We'll confirm shortly.";
+          "Your payment of " + fmt.currency(cardAmount) + " is processing. We'll confirm shortly.";
       }
     });
   } catch (err) {
@@ -288,6 +293,12 @@ document.getElementById("payWithCard").addEventListener("click", async function 
     this.disabled = false;
     this.textContent = "Pay with card";
   }
+});
+
+// best-effort cleanup of unused refs when leaving the page
+window.addEventListener("pagehide", function () {
+  cancelRef(transferRef);
+  cancelRef(cardRef);
 });
 
 document.getElementById("logoutBtn").addEventListener("click", async function (e) {
