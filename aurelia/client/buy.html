@@ -98,6 +98,7 @@
     <div class="pay-tabs">
       <div class="pay-tab active" data-tab="transfer">Bank transfer</div>
       <div class="pay-tab" data-tab="card">Card payment</div>
+      <div class="pay-tab" data-tab="balance">Pay with balance</div>
     </div>
 
     <div class="pay-panel active" id="panel-transfer">
@@ -123,6 +124,16 @@
     <div class="pay-panel" id="panel-card">
       <p class="field-hint" style="margin-bottom:20px;">You'll be redirected to our secure card processor.</p>
       <button class="btn btn-primary" id="payWithCard">Pay with card</button>
+    </div>
+
+    <div class="pay-panel" id="panel-balance">
+      <div class="bank-details">
+        <div class="bank-row"><span class="k">Available balance</span><span id="availableBalance">Loading…</span></div>
+        <div class="bank-row"><span class="k">Purchase total</span><span id="balancePurchaseTotal">₦0.00</span></div>
+        <div class="bank-row"><span class="k">Balance after purchase</span><span id="balanceAfterPurchase">—</span></div>
+      </div>
+      <p class="field-hint" style="margin-bottom:20px;">Your available account balance will be used for this purchase.</p>
+      <button class="btn btn-primary" id="payWithBalance">Pay with balance</button>
     </div>
   </div>
 </main>
@@ -160,6 +171,7 @@ function hideError(){ errorBanner.classList.remove("show"); }
 
 let user = null, stock = null, currentRef = null, currentCost = 0;
 let timerHandle = null, expiresAt = 0, isCancelled = false;
+let availableBalance = null;
 
 const params = new URLSearchParams(window.location.search);
 const symbol = params.get("symbol");
@@ -179,6 +191,7 @@ window.addEventListener("ri:ready", async function (e) {
     ch.className = "change " + (s.change_pct >= 0 ? "up" : "down");
     updateTotal();
     await initiateBuy();
+    await loadAvailableBalance();
   } catch (_) {
     window.location.href = "dashboard.html";
   }
@@ -219,6 +232,50 @@ function updateTotal() {
   document.getElementById("qty").value = qty;
   currentCost = Number((qty * stock.current_price).toFixed(2));
   document.getElementById("total").textContent = fmt.currency(currentCost);
+  document.getElementById("balancePurchaseTotal").textContent = fmt.currency(currentCost);
+  updateBalanceSummary();
+}
+
+function getBalanceValue(data) {
+  // Supports common API response shapes; adjust this if your backend uses a different field.
+  const candidates = [
+    data?.balance, data?.available_balance, data?.wallet_balance,
+    data?.user?.balance, data?.wallet?.balance, data?.account?.balance
+  ];
+  for (const value of candidates) {
+    if (value !== undefined && value !== null && Number.isFinite(Number(value))) return Number(value);
+  }
+  return null;
+}
+
+async function loadAvailableBalance() {
+  const balanceEl = document.getElementById("availableBalance");
+  try {
+    // This endpoint must exist on the backend and return the signed-in user's balance.
+    const data = await api.getBalance();
+    availableBalance = getBalanceValue(data);
+    balanceEl.textContent = availableBalance === null ? "Unavailable" : fmt.currency(availableBalance);
+    document.getElementById("payWithBalance").disabled = availableBalance === null;
+    updateBalanceSummary();
+  } catch (err) {
+    availableBalance = null;
+    balanceEl.textContent = "Unavailable";
+    document.getElementById("balanceAfterPurchase").textContent = "—";
+    document.getElementById("payWithBalance").disabled = true;
+    console.error("Could not load account balance:", err);
+  }
+}
+
+function updateBalanceSummary() {
+  const afterEl = document.getElementById("balanceAfterPurchase");
+  if (availableBalance === null) {
+    afterEl.textContent = "—";
+    return;
+  }
+  afterEl.textContent = availableBalance >= currentCost
+    ? fmt.currency(availableBalance - currentCost)
+    : "Insufficient balance";
+  document.getElementById("payWithBalance").disabled = availableBalance < currentCost;
 }
 
 document.getElementById("qty").addEventListener("change", async () => {
@@ -292,6 +349,45 @@ document.getElementById("confirmTransfer").addEventListener("click", async funct
     showError(err.message);
     this.disabled = false;
     this.textContent = "I've made the transfer";
+  }
+});
+
+document.getElementById("payWithBalance").addEventListener("click", async function () {
+  hideError();
+  if (availableBalance === null) {
+    showError("Your balance is unavailable. Please refresh and try again.");
+    return;
+  }
+
+  const qty = Math.max(1, parseInt(document.getElementById("qty").value) || 1);
+  currentCost = Number((qty * stock.current_price).toFixed(2));
+
+  if (availableBalance < currentCost) {
+    showError("Your available balance is not enough for this purchase.");
+    return;
+  }
+
+  this.disabled = true;
+  this.textContent = "Processing…";
+
+  try {
+    // The backend must verify the balance and debit it atomically; never trust the displayed balance alone.
+    const result = await api.buyWithBalance({
+      symbol: stock.symbol,
+      quantity: qty
+    });
+
+    document.getElementById("buyView").style.display = "none";
+    document.getElementById("successView").style.display = "flex";
+    document.getElementById("successTitle").textContent = "Order submitted";
+    document.getElementById("successDetail").textContent =
+      result?.message || "Your balance payment has been submitted and your order is processing.";
+    await loadAvailableBalance();
+  } catch (err) {
+    showError(err.message || "Balance payment failed. Please try again.");
+  } finally {
+    this.textContent = "Pay with balance";
+    this.disabled = availableBalance === null || availableBalance < currentCost;
   }
 });
 
